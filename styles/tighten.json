@@ -1,0 +1,7 @@
+{
+  "id": "tighten",
+  "label": "Tighten",
+  "tooltip": "Trim fat, keep meaning.",
+  "instruction": "Tighten the text: remove redundancies, shorten sentences, keep meaning unchanged, preserve voice.",
+  "rewrite_scope": "selection"
+}

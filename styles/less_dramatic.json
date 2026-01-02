@@ -1,0 +1,7 @@
+{
+  "id": "less_dramatic",
+  "label": "Less Dramatic",
+  "tooltip": "Dial down melodrama, keep clarity.",
+  "instruction": "Make it less dramatic: reduce purple prose and extreme emotional language, keep it grounded and clear. Preserve meaning, POV, and tense.",
+  "rewrite_scope": "auto"
+}

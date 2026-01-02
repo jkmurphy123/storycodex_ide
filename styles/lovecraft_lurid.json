@@ -1,0 +1,8 @@
+{
+  "id": "lovecraft_lurid",
+  "label": "Lurid",
+  "tooltip": "Grotesque, uncanny, sensory dread.",
+  "instruction": "Increase lurid, grotesque, cosmic-horror tone with uncanny sensory detail and dread. Avoid modern slang. Preserve POV and tense.",
+  "rewrite_scope": "auto",
+  "constraints": { "avoid_modern_slang": true }
+}

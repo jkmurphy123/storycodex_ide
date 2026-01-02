@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 from collections import deque, defaultdict
+from functools import partial
 
 import requests
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -147,6 +148,8 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         self.resize(1400, 900)
 
         self.current_path: Optional[str] = None
+        self.last_dir: Optional[str] = None
+        self.recent_files: List[str] = []
         self.paragraphs: List[str] = []
         self.ranges: List[tuple[int, int]] = []
         self.selected_index = 0
@@ -158,6 +161,8 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         self.rewrite_in_flight = False
         self.rewrite_mode = None
         self.rewrite_selection = None
+        self.style_buttons = []
+        self._load_settings()
         self._build_ui()
         self._build_menu()
 
@@ -201,8 +206,22 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
 
         self.status = QtWidgets.QLabel("")
 
+        self.style_scroll = QtWidgets.QScrollArea()
+        self.style_scroll.setWidgetResizable(True)
+        self.style_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.style_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.style_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        self.style_bar = QtWidgets.QWidget()
+        self.style_layout = QtWidgets.QHBoxLayout(self.style_bar)
+        self.style_layout.setContentsMargins(0, 0, 0, 0)
+        self.style_layout.setSpacing(6)
+        self.style_layout.addStretch(1)
+        self.style_scroll.setWidget(self.style_bar)
+
         right = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(right)
+        v.addWidget(self.style_scroll)
         v.addWidget(self.right_edit)
         v.addWidget(self.instr_box)
         v.addWidget(self.status)
@@ -211,13 +230,46 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         splitter.addWidget(right)
 
         QtGui.QShortcut(QtGui.QKeySequence.Undo, self).activated.connect(self.undo_paragraph)
+        self._build_style_buttons(self._load_styles())
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
         m.addAction("Open", self.open_file)
         m.addAction("Save", self.save_file)
+        self.recent_menu = m.addMenu("Recent...")
+        self._update_recent_menu()
         m.addSeparator()
         m.addAction("Exit", self.close)
+
+    def closeEvent(self, event):
+        if not self.dirty:
+            self._save_settings()
+            event.accept()
+            return
+
+        resp = QtWidgets.QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes. Save before quitting?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes,
+        )
+
+        if resp == QtWidgets.QMessageBox.Cancel:
+            event.ignore()
+            return
+
+        if resp == QtWidgets.QMessageBox.Yes:
+            if not self.current_path:
+                path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save", "", "*.md")
+                if not path:
+                    event.ignore()
+                    return
+                self.current_path = path
+            self.save_file()
+
+        self._save_settings()
+        event.accept()
 
     def ensure_on_screen(self):
         try:
@@ -239,7 +291,8 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
     # -----------------------------
 
     def open_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open", "", "*.md")
+        start_dir = self.last_dir or ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open", start_dir, "*.md")
         if not path:
             return
 
@@ -247,6 +300,8 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
             self.paragraphs = split_paragraphs(f.read())
 
         self.current_path = path
+        self.last_dir = os.path.dirname(path)
+        self._add_recent_file(path)
         self.selected_index = 0
         self.undo_buffers.clear()
         self._rebuild_left()
@@ -261,6 +316,9 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         self.dirty = False
         self._update_title()
         self.status.setText("Saved.")
+        if self.current_path:
+            self.last_dir = os.path.dirname(self.current_path)
+            self._add_recent_file(self.current_path)
 
     # -----------------------------
     # Paragraph selection
@@ -318,6 +376,114 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
     def _set_rewrite_controls_enabled(self, enabled: bool):
         self.right_edit.setEnabled(enabled)
         self.instr_box.setEnabled(enabled)
+        for btn in self.style_buttons:
+            btn.setEnabled(enabled)
+
+    def _load_settings(self):
+        settings = QtCore.QSettings("StoryCodex", "SceneParagraphEditor")
+        self.last_dir = settings.value("last_dir", None)
+        recent = settings.value("recent_files", [])
+        if isinstance(recent, str):
+            recent = [recent]
+        self.recent_files = [p for p in recent if isinstance(p, str)]
+
+    def _save_settings(self):
+        settings = QtCore.QSettings("StoryCodex", "SceneParagraphEditor")
+        settings.setValue("last_dir", self.last_dir)
+        settings.setValue("recent_files", self.recent_files[:8])
+
+    def _add_recent_file(self, path: str):
+        if not path:
+            return
+        self.recent_files = [p for p in self.recent_files if p != path]
+        self.recent_files.insert(0, path)
+        self.recent_files = self.recent_files[:8]
+        self._update_recent_menu()
+
+    def _update_recent_menu(self):
+        if not hasattr(self, "recent_menu"):
+            return
+        self.recent_menu.clear()
+        if not self.recent_files:
+            action = self.recent_menu.addAction("(No recent files)")
+            action.setEnabled(False)
+            return
+        for path in self.recent_files:
+            action = self.recent_menu.addAction(path)
+            action.triggered.connect(lambda _=False, p=path: self._open_recent(p))
+
+    def _open_recent(self, path: str):
+        if not path or not os.path.exists(path):
+            self.status.setText("Recent file not found.")
+            self.recent_files = [p for p in self.recent_files if p != path]
+            self._update_recent_menu()
+            return
+        if self.dirty:
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "You have unsaved changes. Save before opening another file?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Yes,
+            )
+            if resp == QtWidgets.QMessageBox.Cancel:
+                return
+            if resp == QtWidgets.QMessageBox.Yes:
+                if not self.current_path:
+                    save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save", "", "*.md")
+                    if not save_path:
+                        return
+                    self.current_path = save_path
+                self.save_file()
+        with open(path, "r", encoding="utf-8") as f:
+            self.paragraphs = split_paragraphs(f.read())
+        self.current_path = path
+        self.last_dir = os.path.dirname(path)
+        self._add_recent_file(path)
+        self.selected_index = 0
+        self.undo_buffers.clear()
+        self._rebuild_left()
+        self._load_selected()
+        self.dirty = False
+        self._update_title()
+
+    def _load_styles(self):
+        styles_dir = os.path.join(os.getcwd(), "styles")
+        if not os.path.isdir(styles_dir):
+            return []
+
+        styles = []
+        for name in sorted(os.listdir(styles_dir)):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(styles_dir, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            except Exception:
+                continue
+            label = raw.get("label")
+            instruction = raw.get("instruction")
+            if not label or not instruction:
+                continue
+            styles.append({
+                "label": label,
+                "instruction": instruction,
+                "tooltip": raw.get("tooltip", "")
+            })
+        return styles
+
+    def _build_style_buttons(self, styles):
+        for btn in self.style_buttons:
+            btn.deleteLater()
+        self.style_buttons = []
+        for style in styles:
+            btn = QtWidgets.QPushButton(style["label"])
+            if style.get("tooltip"):
+                btn.setToolTip(style["tooltip"])
+            btn.clicked.connect(partial(self._start_rewrite, style["instruction"]))
+            self.style_layout.insertWidget(self.style_layout.count() - 1, btn)
+            self.style_buttons.append(btn)
 
     def _get_rewrite_target(self):
         cursor = self.right_edit.textCursor()
@@ -327,12 +493,12 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
                 return "selection", selected, cursor.selectionStart(), cursor.selectionEnd()
         return "paragraph", self.paragraphs[self.selected_index], None, None
 
-    def _on_rewrite(self):
+    def _start_rewrite(self, instruction: str):
         if self.rewrite_in_flight:
             self.status.setText("Rewrite in progress.")
             return
 
-        instr = self.instr_box.text().strip()
+        instr = instruction.strip()
         if not instr:
             return
 
@@ -354,10 +520,13 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         self.worker.failed.connect(self.thread.quit)
         self.thread.start()
 
+    def _on_rewrite(self):
+        self._start_rewrite(self.instr_box.text())
+
     def _apply_rewrite(self, text):
         rewritten = text.strip()
         if not rewritten:
-            self.status.setText("Rewrite returned empty output.")
+            self.status.setText("Empty rewrite output.")
             self._set_rewrite_controls_enabled(True)
             self.rewrite_in_flight = False
             self.rewrite_mode = None
