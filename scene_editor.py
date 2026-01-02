@@ -121,16 +121,16 @@ class RewriteWorker(QtCore.QObject):
     finished = QtCore.Signal(str)
     failed = QtCore.Signal(str)
 
-    def __init__(self, llm: LLMClient, instruction: str, paragraph: str):
+    def __init__(self, llm: LLMClient, instruction: str, target_text: str):
         super().__init__()
         self.llm = llm
         self.instruction = instruction
-        self.paragraph = paragraph
+        self.target_text = target_text
 
     @QtCore.Slot()
     def run(self):
         try:
-            text = self.llm.rewrite(self.instruction, self.paragraph)
+            text = self.llm.rewrite(self.instruction, self.target_text)
             self.finished.emit(text)
         except Exception as e:
             self.failed.emit(str(e))
@@ -155,6 +155,9 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         self.undo_buffers = defaultdict(lambda: deque(maxlen=10))
 
         self.llm = self._load_llm()
+        self.rewrite_in_flight = False
+        self.rewrite_mode = None
+        self.rewrite_selection = None
         self._build_ui()
         self._build_menu()
 
@@ -216,6 +219,21 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         m.addAction("Exit", self.close)
 
+    def ensure_on_screen(self):
+        try:
+            screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+            if not screen:
+                return
+            geom = screen.availableGeometry()
+            frame = self.frameGeometry()
+            if geom.contains(frame.center()):
+                return
+            x = geom.x() + max(0, (geom.width() - frame.width()) // 2)
+            y = geom.y() + max(0, (geom.height() - frame.height()) // 2)
+            self.move(x, y)
+        except Exception:
+            pass
+
     # -----------------------------
     # File operations
     # -----------------------------
@@ -258,6 +276,9 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
         return False
 
     def _select_paragraph(self, idx):
+        if self.rewrite_in_flight:
+            self.status.setText("Rewrite in progress.")
+            return
         if idx == self.selected_index:
             return
         self._push_undo()
@@ -294,30 +315,83 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
     # Rewrite
     # -----------------------------
 
+    def _set_rewrite_controls_enabled(self, enabled: bool):
+        self.right_edit.setEnabled(enabled)
+        self.instr_box.setEnabled(enabled)
+
+    def _get_rewrite_target(self):
+        cursor = self.right_edit.textCursor()
+        if cursor.hasSelection():
+            selected = cursor.selectedText().replace("\u2029", "\n")
+            if selected.strip():
+                return "selection", selected, cursor.selectionStart(), cursor.selectionEnd()
+        return "paragraph", self.paragraphs[self.selected_index], None, None
+
     def _on_rewrite(self):
+        if self.rewrite_in_flight:
+            self.status.setText("Rewrite in progress.")
+            return
+
         instr = self.instr_box.text().strip()
         if not instr:
             return
 
+        mode, target_text, start, end = self._get_rewrite_target()
         self._push_undo()
-        para = self.paragraphs[self.selected_index]
+        self.rewrite_mode = mode
+        self.rewrite_selection = (start, end) if mode == "selection" else None
+        self.rewrite_in_flight = True
+        self._set_rewrite_controls_enabled(False)
 
         self.thread = QtCore.QThread()
-        self.worker = RewriteWorker(self.llm, instr, para)
+        self.worker = RewriteWorker(self.llm, instr, target_text)
         self.worker.moveToThread(self.thread)
 
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self._apply_rewrite)
-        self.worker.failed.connect(lambda e: self.status.setText(e))
+        self.worker.failed.connect(self._on_rewrite_failed)
         self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
         self.thread.start()
 
     def _apply_rewrite(self, text):
-        self.right_edit.setPlainText(text)
+        rewritten = text.strip()
+        if not rewritten:
+            self.status.setText("Rewrite returned empty output.")
+            self._set_rewrite_controls_enabled(True)
+            self.rewrite_in_flight = False
+            self.rewrite_mode = None
+            self.rewrite_selection = None
+            return
+
+        if self.rewrite_mode == "selection" and self.rewrite_selection:
+            start, end = self.rewrite_selection
+            cursor = self.right_edit.textCursor()
+            cursor.beginEditBlock()
+            cursor.setPosition(start)
+            cursor.setPosition(end, QtGui.QTextCursor.KeepAnchor)
+            cursor.insertText(rewritten)
+            cursor.clearSelection()
+            cursor.endEditBlock()
+            self.right_edit.setTextCursor(cursor)
+        else:
+            self.right_edit.setPlainText(rewritten)
+
         self.instr_box.clear()
         self.status.setText("Rewrite applied.")
         self.dirty = True
         self._update_title()
+        self._set_rewrite_controls_enabled(True)
+        self.rewrite_in_flight = False
+        self.rewrite_mode = None
+        self.rewrite_selection = None
+
+    def _on_rewrite_failed(self, error: str):
+        self.status.setText(error)
+        self._set_rewrite_controls_enabled(True)
+        self.rewrite_in_flight = False
+        self.rewrite_mode = None
+        self.rewrite_selection = None
 
     # -----------------------------
     # Sync helpers
@@ -358,7 +432,9 @@ class SceneEditorWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    SceneEditorWindow().show()
+    window = SceneEditorWindow()
+    window.show()
+    QtCore.QTimer.singleShot(0, window.ensure_on_screen)
     sys.exit(app.exec())
 
 
