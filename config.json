@@ -1,0 +1,10 @@
+{
+  "llm_provider": "openai",
+
+  "openai": {
+    "model": "gpt-4.1",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+
+  "prompt_template": "Rewrite the following paragraph according to the instruction.\n\nInstruction: {instruction}\n\nParagraph:\n{paragraph}\n\nReturn ONLY the rewritten paragraph. Do not add commentary, quotes, or explanations."
+}
